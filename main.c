@@ -32,6 +32,8 @@ int main(int argc, const char *argv[]) {
   memset(buffer, 1, sizeof(buffer));
 
   for (i = 0; i < iovcnt; i++) {
+    printf("buffer[%d] at %p\n", i, buffer[i]);
+    sprintf(buffer[i], "Elias-%d\n", i);
     iov[i].iov_base = buffer[i];
     iov[i].iov_len = sizeof(buffer[i]);
   }

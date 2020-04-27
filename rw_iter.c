@@ -1,7 +1,9 @@
 #include <linux/fs.h>
 #include <linux/kernel.h>
 #include <linux/miscdevice.h>
+#include <linux/mm.h>
 #include <linux/module.h>
+#include <linux/pagemap.h>
 #include <linux/uio.h>
 
 static char dummy_data[1024];
@@ -16,7 +18,7 @@ static int sample_close(struct inode *inodep, struct file *filp) {
   return 0;
 }
 
-void describe(const struct iov_iter *iov_iter) {
+static void describe(const struct iov_iter *iov_iter) {
   int i;
   pr_info("offset:%ld\n", iov_iter->iov_offset);
   pr_info("count:%ld\n", iov_iter_count(iov_iter));
@@ -32,7 +34,7 @@ void describe(const struct iov_iter *iov_iter) {
     case ITER_IOVEC:
       pr_info("\tITER_IOVEC\n");
       for (i = 0; i < iov_iter->nr_segs; i++) {
-        pr_info("\tbase:%p\tlen=%ld\n", iov_iter->iov[i].iov_base,
+        pr_info("\tbase:%pS\tlen=%ld\n", iov_iter->iov[i].iov_base,
                 iov_iter->iov[i].iov_len);
       }
       break;
@@ -53,12 +55,95 @@ void describe(const struct iov_iter *iov_iter) {
       break;
   }
   pr_info("nr_segs:%ld\n", iov_iter->nr_segs);
-  pr_info("pages:%d\n", iov_iter_npages(iov_iter, INT_MAX));
+}
+
+// This function is inspired on block/bio.c:bio_map_user_iov
+static void inspect_pages(struct iov_iter *iov_iter) {
+  int num_pages;
+  struct page **pages;
+  const void *to_free;
+  struct iov_iter clone;
+  size_t len;
+  int npages;
+
+  // iov_iter_get_pages_alloc return a mapping to the first iov only
+  // if we want to map all of then, we going to need to interate over it
+  // So we don't have an array of num_pages after the return of
+  // iov_iter_get_pages_alloc as I tought it would be on the first place
+  num_pages = iov_iter_npages(iov_iter, INT_MAX);
+  pr_info("Total of pages:%d\n", num_pages);
+
+  // We will clone it because we want to inspect the memory without afect the
+  // iterator There is no documentation but the return of dup_ite must be free
+  // by the user
+  to_free = dup_iter(&clone, iov_iter, GFP_KERNEL);
+
+  // TODO: Remove the following lines, once we know what they do
+  // iov_iter_single_seg_count(&clone);
+  // length;
+
+  len = iov_iter_count(&clone);
+  pr_info("Total len=%ld\n", len);
+  while (len > 0) {
+    int i;
+    size_t offs, bytes;
+    char us[32] = {
+        0,
+    };
+    int us_len = 0;
+    // We are going to use maxsize = PAGE_SIZE, it means it will return at most
+    // two pages
+    bytes = iov_iter_get_pages_alloc(&clone, &pages, PAGE_SIZE, &offs);
+    pr_info("\tpage size bytes:%ld\n", bytes);
+    pr_info("\tpage offs:%ld\n", offs);
+
+    // We update how many bytes left to be mapped and advance the iterator
+    len -= bytes;
+    iov_iter_advance(&clone, bytes);
+
+    // To be sure the actual number of pages,
+    // we must calculate if the data crossed a page bondary
+    npages = DIV_ROUND_UP(offs + bytes, PAGE_SIZE);
+    pr_info("\tnumber of pages for this mapping:%d\n", npages);
+
+    for (i = 0; i < npages; i++) {
+      struct page *page = pages[i];
+      size_t n = PAGE_SIZE - offs;
+      void *myaddr;
+
+      if (n > bytes) n = bytes;
+
+      pr_info("\t\t%ld bytes on the page %d\n", n, i);
+
+      // kmap configures the MMU so we can access the memory from this context
+      myaddr = kmap(page) + offs;
+
+      // As you will se the addr are not continuos here like they are on the userspace
+      pr_info("\t\tkernel addr:%pS to %pS\n", myaddr, myaddr + n - 1);
+
+      offs = 0;
+      bytes -= n;
+
+      // Let's inspect the memory
+      for (; (us_len < sizeof(us) - 1) && n; us_len++, n--) {
+        us[us_len] = *((char *)myaddr);
+        myaddr++;
+      }
+
+      kunmap(page);
+    }
+
+    pr_info("\t\tuser string:%6s\n", us);
+    kvfree(pages);
+  }
+
+  kfree(to_free);
 }
 
 ssize_t sample_read_iter(struct kiocb *iocb, struct iov_iter *to) {
   size_t len = iov_iter_count(to);
   describe(to);
+  inspect_pages(to);
   pr_info("Ykukky - I just throw up %ld bytes\n", len);
   return copy_to_iter(dummy_data, sizeof(dummy_data), to);
 }
@@ -66,6 +151,7 @@ ssize_t sample_read_iter(struct kiocb *iocb, struct iov_iter *to) {
 ssize_t sample_write_iter(struct kiocb *iocb, struct iov_iter *from) {
   size_t len = iov_iter_count(from);
   describe(from);
+  inspect_pages(from);
   pr_info("Yummy - I just ate %ld bytes\n", len);
   return copy_from_iter(dummy_data, sizeof(dummy_data), from);
 }
