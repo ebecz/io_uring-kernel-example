@@ -120,6 +120,7 @@ static void inspect_pages(struct iov_iter *iov_iter) {
 
       // As you will se the addr are not continuos here like they are on the userspace
       pr_info("\t\tkernel addr:%pS to %pS\n", myaddr, myaddr + n - 1);
+      pr_info("\t\tphysical addr:%llx to %llx\n",  virt_to_phys(myaddr), virt_to_phys(myaddr + n - 1));
 
       offs = 0;
       bytes -= n;
