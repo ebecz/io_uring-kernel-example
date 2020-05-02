@@ -11,10 +11,16 @@ static char dummy_data[1024];
 
 struct workqueue_struct *workqueue;
 
+#define RW_MAX_PAGES 10
 struct rw_work {
   struct delayed_work delayed_work;
   struct kiocb *iocb;
-  int count;
+  int num_pages;
+  struct rw_page {
+    struct page *page;
+    size_t offs;
+    size_t bytes;
+  } page [RW_MAX_PAGES];
 };
 
 static int sample_open(struct inode *inode, struct file *file) {
@@ -82,7 +88,7 @@ static void inspect_pages(struct iov_iter *iov_iter) {
   num_pages = iov_iter_npages(iov_iter, INT_MAX);
   pr_info("Total of pages:%d\n", num_pages);
 
-  // We will clone it because we want to inspect the memory without afect the
+  // We will clone it because we want to inspect the memory without affect the
   // iterator There is no documentation but the return of dup_ite must be free
   // by the user
   to_free = dup_iter(&clone, iov_iter, GFP_KERNEL);
@@ -150,11 +156,46 @@ static void inspect_pages(struct iov_iter *iov_iter) {
   kfree(to_free);
 }
 
+static void rw_work_fill_pages(struct rw_work *rw_work, struct iov_iter *iov_iter)
+{
+  size_t len;
+
+  rw_work->num_pages = 0;
+
+  len = iov_iter_count(iov_iter);
+
+  while (len > 0) {
+    struct rw_page *rw_page = &rw_work->page[rw_work->num_pages];
+
+    rw_page->bytes = iov_iter_get_pages(iov_iter, &rw_page->page, PAGE_SIZE, 1, &rw_page->offs);
+    len -= rw_page->bytes;
+    iov_iter_advance(iov_iter, rw_page->bytes);
+    rw_work->num_pages++;
+   
+    if (rw_work->num_pages == RW_MAX_PAGES) {
+      pr_info("Not enough number of pages - truncating operation\n.");
+    }
+  }
+  pr_info("got %d pages\n", rw_work->num_pages);
+}
+
+static void rw_work_release_pages(struct rw_work *rw_work)
+{
+  int i;
+  for (i = 0; i < rw_work->num_pages; i++) {
+    struct rw_page *rw_page = &rw_work->page[i];
+    put_page(rw_page->page);
+  }
+  pr_info("released %d pages\n", rw_work->num_pages);
+}
+
 static void complete_read(struct work_struct *work)
 {
   struct rw_work *rw_work = container_of(work, struct rw_work, delayed_work.work);
   struct kiocb *iocb = rw_work->iocb;
-  int count = rw_work->count;
+  int count = 0;
+
+  rw_work_release_pages(rw_work);
 
   pr_info("delayed work %s\n", __func__);
   if (iocb && iocb->ki_complete) {
@@ -164,12 +205,12 @@ static void complete_read(struct work_struct *work)
   kfree(rw_work);
 }
 
-static ssize_t schedule_read_work(struct kiocb *iocb, int count)
+static ssize_t schedule_read_work(struct kiocb *iocb, struct iov_iter *to)
 {
     struct rw_work *rw_work;
     rw_work = kzalloc(sizeof(*rw_work), GFP_KERNEL);
     rw_work->iocb = iocb;
-    rw_work->count = count;
+    rw_work_fill_pages(rw_work, to);
     INIT_DELAYED_WORK(&rw_work->delayed_work, complete_read);
     queue_delayed_work(workqueue, &rw_work->delayed_work, msecs_to_jiffies(2000));
     return -EIOCBQUEUED;
@@ -177,19 +218,17 @@ static ssize_t schedule_read_work(struct kiocb *iocb, int count)
 
 static ssize_t sample_read_iter(struct kiocb *iocb, struct iov_iter *to) {
   size_t len = iov_iter_count(to);
-  int count;
 
   describe(to);
   inspect_pages(to);
 
   pr_info("Ykukky - I just throw up %ld bytes\n", len);
-  count = copy_to_iter(dummy_data, sizeof(dummy_data), to);
   if (is_sync_kiocb(iocb)) {
     pr_info("Synchronous read request\n");
-    return count;
+    return copy_to_iter(dummy_data, sizeof(dummy_data), to);
   } else {
     pr_info("Asynchronous read request\n");
-    return schedule_read_work(iocb, count);
+    return schedule_read_work(iocb, to);
   }
 }
 
@@ -197,7 +236,9 @@ static void complete_write(struct work_struct *work)
 {
   struct rw_work *rw_work = container_of(work, struct rw_work, delayed_work.work);
   struct kiocb *iocb = rw_work->iocb;
-  int count = rw_work->count;
+  int count = 0;
+
+  rw_work_release_pages(rw_work);
 
   pr_info("delayed work %s\n", __func__);
   if (iocb && iocb->ki_complete) {
@@ -207,12 +248,12 @@ static void complete_write(struct work_struct *work)
   kfree(rw_work);
 }
 
-static ssize_t schedule_write_work(struct kiocb *iocb, int count)
+static ssize_t schedule_write_work(struct kiocb *iocb, struct iov_iter *from)
 {
     struct rw_work *rw_work;
     rw_work = kzalloc(sizeof(*rw_work), GFP_KERNEL);
     rw_work->iocb = iocb;
-    rw_work->count = count;
+    rw_work_fill_pages(rw_work, from);
     INIT_DELAYED_WORK(&rw_work->delayed_work, complete_write);
     queue_delayed_work(workqueue, &rw_work->delayed_work, msecs_to_jiffies(2000));
     return -EIOCBQUEUED;
@@ -221,19 +262,18 @@ static ssize_t schedule_write_work(struct kiocb *iocb, int count)
 
 ssize_t sample_write_iter(struct kiocb *iocb, struct iov_iter *from) {
   size_t len = iov_iter_count(from);
-  int count;
 
   describe(from);
   inspect_pages(from);
 
   pr_info("Yummy - I just ate %ld bytes\n", len);
-  count = copy_from_iter(dummy_data, sizeof(dummy_data), from);
+
   if (is_sync_kiocb(iocb)) {
     pr_info("Synchronous write request\n");
-    return count;
+    return copy_from_iter(dummy_data, sizeof(dummy_data), from);
   } else {
     pr_info("Asynchronous write request\n");
-    return schedule_write_work(iocb, count);
+    return schedule_write_work(iocb, from);
   }
 }
 

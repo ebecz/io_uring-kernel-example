@@ -84,10 +84,10 @@ int async_rw(int fd, struct iovec *iov, int iovcnt, int offset)
   }
 
   if (io_uring_cqe_get_data(cqe) == &const_write)
-    fprintf(stderr, "Write completed\n");
+    fprintf(stderr, "Write completed (%d bytes)\n", cqe->res);
 
   if (io_uring_cqe_get_data(cqe) == &const_read)
-    fprintf(stderr, "Read completed\n");
+    fprintf(stderr, "Read completed (%d bytes)\n", cqe->res);
 
   io_uring_cqe_seen(&ring, cqe);
 
@@ -97,10 +97,10 @@ int async_rw(int fd, struct iovec *iov, int iovcnt, int offset)
   }
 
   if (io_uring_cqe_get_data(cqe) == &const_write)
-    fprintf(stderr, "Write completed\n");
+    fprintf(stderr, "Write completed (%d bytes)\n", cqe->res);
 
   if (io_uring_cqe_get_data(cqe) == &const_read)
-    fprintf(stderr, "Read completed\n");
+    fprintf(stderr, "Read completed (%d bytes)\n", cqe->res);
 
   io_uring_cqe_seen(&ring, cqe);
 
