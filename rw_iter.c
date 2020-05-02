@@ -5,8 +5,11 @@
 #include <linux/module.h>
 #include <linux/pagemap.h>
 #include <linux/uio.h>
+#include <linux/workqueue.h>
 
 static char dummy_data[1024];
+
+struct workqueue_struct *workqueue;
 
 static int sample_open(struct inode *inode, struct file *file) {
   pr_info("I have been awoken\n");
@@ -141,30 +144,66 @@ static void inspect_pages(struct iov_iter *iov_iter) {
   kfree(to_free);
 }
 
+static struct kiocb *riocb = NULL;
+static int rcount;
+static void complete_read(struct work_struct *w)
+{
+  pr_info("delayed work %s\n", __func__);
+  if (riocb && riocb->ki_complete) {
+    riocb->ki_complete(riocb, rcount, 0);
+    pr_info("delayed work called\n");
+  }
+  riocb = NULL;
+}
+
+DECLARE_DELAYED_WORK(read_work, complete_read);
+
 ssize_t sample_read_iter(struct kiocb *iocb, struct iov_iter *to) {
   size_t len = iov_iter_count(to);
   describe(to);
   inspect_pages(to);
+  pr_info("Ykukky - I just throw up %ld bytes\n", len);
+  rcount = copy_to_iter(dummy_data, sizeof(dummy_data), to);
   if (is_sync_kiocb(iocb)) {
     pr_info("Synchronous read request\n");
+    return rcount;
   } else {
     pr_info("Asynchronous read request\n");
+    riocb = iocb;
+    queue_delayed_work(workqueue, &read_work, msecs_to_jiffies(2000));
+    return -EIOCBQUEUED;
   }
-  pr_info("Ykukky - I just throw up %ld bytes\n", len);
-  return copy_to_iter(dummy_data, sizeof(dummy_data), to);
 }
+
+static struct kiocb *wiocb = NULL;
+static int wcount;
+static void complete_write(struct work_struct *w)
+{
+  pr_info("delayed work %s\n", __func__);
+  if (wiocb && wiocb->ki_complete) {
+    wiocb->ki_complete(wiocb, wcount, 0);
+    pr_info("delayed work called\n");
+  }
+  wiocb = NULL;
+}
+
+DECLARE_DELAYED_WORK(write_work, complete_write);
 
 ssize_t sample_write_iter(struct kiocb *iocb, struct iov_iter *from) {
   size_t len = iov_iter_count(from);
   describe(from);
   inspect_pages(from);
+  pr_info("Yummy - I just ate %ld bytes\n", len);
+  wcount = copy_from_iter(dummy_data, sizeof(dummy_data), from);
   if (is_sync_kiocb(iocb)) {
     pr_info("Synchronous write request\n");
+    return wcount;
   } else {
     pr_info("Asynchronous write request\n");
+    wiocb = iocb;
+    queue_delayed_work(workqueue, &write_work, msecs_to_jiffies(1000));
+    return -EIOCBQUEUED;
   }
-  pr_info("Yummy - I just ate %ld bytes\n", len);
-  return copy_from_iter(dummy_data, sizeof(dummy_data), from);
 }
 
 static const struct file_operations sample_fops = {
@@ -185,8 +224,15 @@ struct miscdevice sample_device = {
 static int __init misc_init(void) {
   int error;
 
+  workqueue = create_singlethread_workqueue("RW testing\n");
+  if (workqueue == NULL) {
+    pr_err("Unable to create an workqueue\n");
+    return -1;
+  }
+
   error = misc_register(&sample_device);
   if (error) {
+    destroy_workqueue(workqueue);
     pr_err("can't misc_register :(\n");
     return error;
   }
@@ -197,6 +243,9 @@ static int __init misc_init(void) {
 
 static void __exit misc_exit(void) {
   misc_deregister(&sample_device);
+  cancel_delayed_work_sync(&read_work);
+  cancel_delayed_work_sync(&write_work);
+  destroy_workqueue(workqueue);
   pr_info("I'm out\n");
 }
 

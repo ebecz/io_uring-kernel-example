@@ -46,6 +46,7 @@ int async_rw(int fd, struct iovec *iov, int iovcnt, int offset)
   struct io_uring_sqe *sqe;
   struct io_uring_cqe *cqe;
   struct io_uring ring;
+  static int const_read = 1, const_write = 2;
   int ret;
 
   fprintf(stderr, "Performing async RW\n");
@@ -62,6 +63,7 @@ int async_rw(int fd, struct iovec *iov, int iovcnt, int offset)
     return -1;
   }
   io_uring_prep_readv(sqe, fd, iov, iovcnt, offset);  
+  io_uring_sqe_set_data(sqe, &const_read);
 
   sqe = io_uring_get_sqe(&ring);
   if (sqe == NULL) {
@@ -69,6 +71,7 @@ int async_rw(int fd, struct iovec *iov, int iovcnt, int offset)
     return -1;
   }
   io_uring_prep_writev(sqe, fd, iov, iovcnt, offset);  
+  io_uring_sqe_set_data(sqe, &const_write);
 
   if (io_uring_submit(&ring) != 2) {
     fprintf(stderr, "Can't do submit\n");
@@ -80,10 +83,26 @@ int async_rw(int fd, struct iovec *iov, int iovcnt, int offset)
     return -1;
   }
 
+  if (io_uring_cqe_get_data(cqe) == &const_write)
+    fprintf(stderr, "Write completed\n");
+
+  if (io_uring_cqe_get_data(cqe) == &const_read)
+    fprintf(stderr, "Read completed\n");
+
+  io_uring_cqe_seen(&ring, cqe);
+
   if (io_uring_wait_cqe_nr(&ring, &cqe, 1) < 0) {
     fprintf(stderr, "Can't wait cqe\n");
     return -1;
   }
+
+  if (io_uring_cqe_get_data(cqe) == &const_write)
+    fprintf(stderr, "Write completed\n");
+
+  if (io_uring_cqe_get_data(cqe) == &const_read)
+    fprintf(stderr, "Read completed\n");
+
+  io_uring_cqe_seen(&ring, cqe);
 
   io_uring_queue_exit(&ring);
 }
