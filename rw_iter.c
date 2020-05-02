@@ -145,6 +145,11 @@ ssize_t sample_read_iter(struct kiocb *iocb, struct iov_iter *to) {
   size_t len = iov_iter_count(to);
   describe(to);
   inspect_pages(to);
+  if (is_sync_kiocb(iocb)) {
+    pr_info("Synchronous read request\n");
+  } else {
+    pr_info("Asynchronous read request\n");
+  }
   pr_info("Ykukky - I just throw up %ld bytes\n", len);
   return copy_to_iter(dummy_data, sizeof(dummy_data), to);
 }
@@ -153,6 +158,11 @@ ssize_t sample_write_iter(struct kiocb *iocb, struct iov_iter *from) {
   size_t len = iov_iter_count(from);
   describe(from);
   inspect_pages(from);
+  if (is_sync_kiocb(iocb)) {
+    pr_info("Synchronous write request\n");
+  } else {
+    pr_info("Asynchronous write request\n");
+  }
   pr_info("Yummy - I just ate %ld bytes\n", len);
   return copy_from_iter(dummy_data, sizeof(dummy_data), from);
 }

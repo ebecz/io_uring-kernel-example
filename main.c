@@ -3,6 +3,9 @@
 #include <sys/stat.h>
 #include <sys/types.h>
 
+// atoi
+#include <stdlib.h>
+
 // pwritev
 #include <sys/uio.h>
 
@@ -15,12 +18,80 @@
 // memset
 #include <string.h>
 
-int main(int argc, const char *argv[]) {
+// io_uring
+#include <liburing.h>
+#define QD 2
+
+int sync_rw(int fd, struct iovec *iov, int iovcnt, int offset)
+{
   size_t count;
+
+  fprintf(stderr, "Performing sync RW\n");
+
+  count = preadv(fd, iov, iovcnt, offset);
+  if (count < 0) {
+    fprintf(stderr, "Unable to preadv in /dev/rw_iter\n");
+    return -1;
+  }
+
+  count = pwritev(fd, iov, iovcnt, offset);
+  if (count < 0) {
+    fprintf(stderr, "Unable to pwritev in /dev/rw_iter\n");
+    return -1;
+  }
+}
+
+int async_rw(int fd, struct iovec *iov, int iovcnt, int offset)
+{
+  struct io_uring_sqe *sqe;
+  struct io_uring_cqe *cqe;
+  struct io_uring ring;
+  int ret;
+
+  fprintf(stderr, "Performing async RW\n");
+
+  ret = io_uring_queue_init(QD, &ring, 0);
+  if (ret < 0) {
+    fprintf(stderr, "queue_init: %s\n", strerror(-ret));
+    return -1;
+  }
+
+  sqe = io_uring_get_sqe(&ring);
+  if (sqe == NULL) {
+    fprintf(stderr, "Can't get sqe\n");
+    return -1;
+  }
+  io_uring_prep_readv(sqe, fd, iov, iovcnt, offset);  
+
+  sqe = io_uring_get_sqe(&ring);
+  if (sqe == NULL) {
+    fprintf(stderr, "Can't get sqe\n");
+    return -1;
+  }
+  io_uring_prep_writev(sqe, fd, iov, iovcnt, offset);  
+
+  if (io_uring_submit(&ring) != 2) {
+    fprintf(stderr, "Can't do submit\n");
+    return -1;
+  }
+
+  if (io_uring_wait_cqe_nr(&ring, &cqe, 1) < 0) {
+    fprintf(stderr, "Can't wait cqe\n");
+    return -1;
+  }
+
+  if (io_uring_wait_cqe_nr(&ring, &cqe, 1) < 0) {
+    fprintf(stderr, "Can't wait cqe\n");
+    return -1;
+  }
+
+  io_uring_queue_exit(&ring);
+}
+
+int main(int argc, const char *argv[]) {
   int iovcnt = 4;
-  struct iovec iov[iovcnt];
-  int offset = 0;
   char buffer[iovcnt][512];
+  struct iovec iov[iovcnt];
   int fd, i;
 
   fd = open("/dev/rw_iter", O_RDWR);
@@ -38,19 +109,13 @@ int main(int argc, const char *argv[]) {
     iov[i].iov_len = sizeof(buffer[i]);
   }
 
-  count = preadv(fd, iov, iovcnt, offset);
-  if (count < 0) {
-    fprintf(stderr, "Unable to preadv in /dev/rw_iter\n");
-    return -1;
-  }
-
-  count = pwritev(fd, iov, iovcnt, offset);
-  if (count < 0) {
-    fprintf(stderr, "Unable to pwritev in /dev/rw_iter\n");
-    return -1;
-  }
+  if (argc == 2 && atoi(argv[1]))
+    async_rw(fd, iov, iovcnt, 0);
+  else
+    sync_rw(fd, iov, iovcnt, 0);
 
   close(fd);
 
   return 0;
 }
+
