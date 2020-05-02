@@ -7,7 +7,7 @@
 #include <linux/uio.h>
 #include <linux/workqueue.h>
 
-static char dummy_data[1024];
+static char dummy_data[4800];
 
 struct workqueue_struct *workqueue;
 
@@ -20,6 +20,7 @@ struct rw_work {
     struct page *page;
     size_t offs;
     size_t bytes;
+    size_t seek;
   } page [RW_MAX_PAGES];
 };
 
@@ -159,9 +160,9 @@ static void inspect_pages(struct iov_iter *iov_iter) {
 static void rw_work_fill_pages(struct rw_work *rw_work, struct iov_iter *iov_iter)
 {
   size_t len;
+  size_t seek = iov_iter->iov_offset;
 
   rw_work->num_pages = 0;
-
   len = iov_iter_count(iov_iter);
 
   while (len > 0) {
@@ -169,33 +170,41 @@ static void rw_work_fill_pages(struct rw_work *rw_work, struct iov_iter *iov_ite
 
     rw_page->bytes = iov_iter_get_pages(iov_iter, &rw_page->page, PAGE_SIZE, 1, &rw_page->offs);
     len -= rw_page->bytes;
+    rw_page->seek = seek;
+    seek += rw_page->bytes;
     iov_iter_advance(iov_iter, rw_page->bytes);
+
     rw_work->num_pages++;
-   
     if (rw_work->num_pages == RW_MAX_PAGES) {
       pr_info("Not enough number of pages - truncating operation\n.");
+      break;
     }
   }
   pr_info("got %d pages\n", rw_work->num_pages);
-}
-
-static void rw_work_release_pages(struct rw_work *rw_work)
-{
-  int i;
-  for (i = 0; i < rw_work->num_pages; i++) {
-    struct rw_page *rw_page = &rw_work->page[i];
-    put_page(rw_page->page);
-  }
-  pr_info("released %d pages\n", rw_work->num_pages);
 }
 
 static void complete_read(struct work_struct *work)
 {
   struct rw_work *rw_work = container_of(work, struct rw_work, delayed_work.work);
   struct kiocb *iocb = rw_work->iocb;
-  int count = 0;
+  size_t count = 0;
 
-  rw_work_release_pages(rw_work);
+  int i;
+  for (i = 0; i < rw_work->num_pages; i++) {
+    struct rw_page *rw_page = &rw_work->page[i];
+    void *kaddr = kmap(rw_page->page) + rw_page->offs;
+    ssize_t bytes = rw_page->bytes;
+    if ((bytes + rw_page->seek) > sizeof(dummy_data)) {
+      bytes = sizeof(dummy_data) - rw_page->seek;
+      bytes = (bytes < 0) ? 0 : bytes;
+    }
+    pr_info("Copy %ld (%ld) bytes from %pS from %ld\n", rw_page->bytes, bytes, kaddr, rw_page->seek);
+    memcpy(kaddr, dummy_data + rw_page->seek, bytes);
+    count += bytes;
+    if (kaddr)
+      kunmap(rw_page->page);
+    put_page(rw_page->page);
+  }
 
   pr_info("delayed work %s\n", __func__);
   if (iocb && iocb->ki_complete) {
@@ -236,9 +245,24 @@ static void complete_write(struct work_struct *work)
 {
   struct rw_work *rw_work = container_of(work, struct rw_work, delayed_work.work);
   struct kiocb *iocb = rw_work->iocb;
-  int count = 0;
+  size_t count = 0;
+  int i;
 
-  rw_work_release_pages(rw_work);
+  for (i = 0; i < rw_work->num_pages; i++) {
+    struct rw_page *rw_page = &rw_work->page[i];
+    void *kaddr = kmap(rw_page->page) + rw_page->offs;
+    ssize_t bytes = rw_page->bytes;
+    if ((bytes + rw_page->seek) > sizeof(dummy_data)) {
+      bytes = sizeof(dummy_data) - rw_page->seek;
+      bytes = (bytes < 0) ? 0 : bytes;
+    }
+    pr_info("Copy %ld (%ld) bytes from %pS to %ld\n", rw_page->bytes, bytes, kaddr, rw_page->seek);
+    memcpy(dummy_data + rw_page->seek, kaddr, bytes);
+    count += bytes;
+    if (kaddr)
+      kunmap(rw_page->page);
+    put_page(rw_page->page);
+  }
 
   pr_info("delayed work %s\n", __func__);
   if (iocb && iocb->ki_complete) {
@@ -255,7 +279,7 @@ static ssize_t schedule_write_work(struct kiocb *iocb, struct iov_iter *from)
     rw_work->iocb = iocb;
     rw_work_fill_pages(rw_work, from);
     INIT_DELAYED_WORK(&rw_work->delayed_work, complete_write);
-    queue_delayed_work(workqueue, &rw_work->delayed_work, msecs_to_jiffies(2000));
+    queue_delayed_work(workqueue, &rw_work->delayed_work, msecs_to_jiffies(1000));
     return -EIOCBQUEUED;
 }
 
