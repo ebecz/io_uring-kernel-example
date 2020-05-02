@@ -78,31 +78,20 @@ int async_rw(int fd, struct iovec *iov, int iovcnt, int offset)
     return -1;
   }
 
-  if (io_uring_wait_cqe_nr(&ring, &cqe, 1) < 0) {
-    fprintf(stderr, "Can't wait cqe\n");
-    return -1;
+  for (int i = 0; i < 2; i++) {
+    if (io_uring_wait_cqe_nr(&ring, &cqe, 1) < 0) {
+      fprintf(stderr, "Can't wait cqe\n");
+      return -1;
+    }
+
+    if (io_uring_cqe_get_data(cqe) == &const_write)
+      fprintf(stderr, "Write completed (%d bytes)\n", cqe->res);
+
+    if (io_uring_cqe_get_data(cqe) == &const_read)
+      fprintf(stderr, "Read completed (%d bytes)\n", cqe->res);
+
+    io_uring_cqe_seen(&ring, cqe);
   }
-
-  if (io_uring_cqe_get_data(cqe) == &const_write)
-    fprintf(stderr, "Write completed (%d bytes)\n", cqe->res);
-
-  if (io_uring_cqe_get_data(cqe) == &const_read)
-    fprintf(stderr, "Read completed (%d bytes)\n", cqe->res);
-
-  io_uring_cqe_seen(&ring, cqe);
-
-  if (io_uring_wait_cqe_nr(&ring, &cqe, 1) < 0) {
-    fprintf(stderr, "Can't wait cqe\n");
-    return -1;
-  }
-
-  if (io_uring_cqe_get_data(cqe) == &const_write)
-    fprintf(stderr, "Write completed (%d bytes)\n", cqe->res);
-
-  if (io_uring_cqe_get_data(cqe) == &const_read)
-    fprintf(stderr, "Read completed (%d bytes)\n", cqe->res);
-
-  io_uring_cqe_seen(&ring, cqe);
 
   io_uring_queue_exit(&ring);
 }
