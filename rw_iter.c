@@ -11,6 +11,12 @@ static char dummy_data[1024];
 
 struct workqueue_struct *workqueue;
 
+struct rw_work {
+  struct delayed_work delayed_work;
+  struct kiocb *iocb;
+  int count;
+};
+
 static int sample_open(struct inode *inode, struct file *file) {
   pr_info("I have been awoken\n");
   return 0;
@@ -144,65 +150,90 @@ static void inspect_pages(struct iov_iter *iov_iter) {
   kfree(to_free);
 }
 
-static struct kiocb *riocb = NULL;
-static int rcount;
-static void complete_read(struct work_struct *w)
+static void complete_read(struct work_struct *work)
 {
+  struct rw_work *rw_work = container_of(work, struct rw_work, delayed_work.work);
+  struct kiocb *iocb = rw_work->iocb;
+  int count = rw_work->count;
+
   pr_info("delayed work %s\n", __func__);
-  if (riocb && riocb->ki_complete) {
-    riocb->ki_complete(riocb, rcount, 0);
+  if (iocb && iocb->ki_complete) {
+    iocb->ki_complete(iocb, count, 0);
     pr_info("delayed work called\n");
   }
-  riocb = NULL;
+  kfree(rw_work);
 }
 
-DECLARE_DELAYED_WORK(read_work, complete_read);
+static ssize_t schedule_read_work(struct kiocb *iocb, int count)
+{
+    struct rw_work *rw_work;
+    rw_work = kzalloc(sizeof(*rw_work), GFP_KERNEL);
+    rw_work->iocb = iocb;
+    rw_work->count = count;
+    INIT_DELAYED_WORK(&rw_work->delayed_work, complete_read);
+    queue_delayed_work(workqueue, &rw_work->delayed_work, msecs_to_jiffies(2000));
+    return -EIOCBQUEUED;
+}
 
-ssize_t sample_read_iter(struct kiocb *iocb, struct iov_iter *to) {
+static ssize_t sample_read_iter(struct kiocb *iocb, struct iov_iter *to) {
   size_t len = iov_iter_count(to);
+  int count;
+
   describe(to);
   inspect_pages(to);
+
   pr_info("Ykukky - I just throw up %ld bytes\n", len);
-  rcount = copy_to_iter(dummy_data, sizeof(dummy_data), to);
+  count = copy_to_iter(dummy_data, sizeof(dummy_data), to);
   if (is_sync_kiocb(iocb)) {
     pr_info("Synchronous read request\n");
-    return rcount;
+    return count;
   } else {
     pr_info("Asynchronous read request\n");
-    riocb = iocb;
-    queue_delayed_work(workqueue, &read_work, msecs_to_jiffies(2000));
-    return -EIOCBQUEUED;
+    return schedule_read_work(iocb, count);
   }
 }
 
-static struct kiocb *wiocb = NULL;
-static int wcount;
-static void complete_write(struct work_struct *w)
+static void complete_write(struct work_struct *work)
 {
+  struct rw_work *rw_work = container_of(work, struct rw_work, delayed_work.work);
+  struct kiocb *iocb = rw_work->iocb;
+  int count = rw_work->count;
+
   pr_info("delayed work %s\n", __func__);
-  if (wiocb && wiocb->ki_complete) {
-    wiocb->ki_complete(wiocb, wcount, 0);
+  if (iocb && iocb->ki_complete) {
+    iocb->ki_complete(iocb, count, 0);
     pr_info("delayed work called\n");
   }
-  wiocb = NULL;
+  kfree(rw_work);
 }
 
-DECLARE_DELAYED_WORK(write_work, complete_write);
+static ssize_t schedule_write_work(struct kiocb *iocb, int count)
+{
+    struct rw_work *rw_work;
+    rw_work = kzalloc(sizeof(*rw_work), GFP_KERNEL);
+    rw_work->iocb = iocb;
+    rw_work->count = count;
+    INIT_DELAYED_WORK(&rw_work->delayed_work, complete_write);
+    queue_delayed_work(workqueue, &rw_work->delayed_work, msecs_to_jiffies(2000));
+    return -EIOCBQUEUED;
+}
+
 
 ssize_t sample_write_iter(struct kiocb *iocb, struct iov_iter *from) {
   size_t len = iov_iter_count(from);
+  int count;
+
   describe(from);
   inspect_pages(from);
+
   pr_info("Yummy - I just ate %ld bytes\n", len);
-  wcount = copy_from_iter(dummy_data, sizeof(dummy_data), from);
+  count = copy_from_iter(dummy_data, sizeof(dummy_data), from);
   if (is_sync_kiocb(iocb)) {
     pr_info("Synchronous write request\n");
-    return wcount;
+    return count;
   } else {
     pr_info("Asynchronous write request\n");
-    wiocb = iocb;
-    queue_delayed_work(workqueue, &write_work, msecs_to_jiffies(1000));
-    return -EIOCBQUEUED;
+    return schedule_write_work(iocb, count);
   }
 }
 
@@ -243,8 +274,7 @@ static int __init misc_init(void) {
 
 static void __exit misc_exit(void) {
   misc_deregister(&sample_device);
-  cancel_delayed_work_sync(&read_work);
-  cancel_delayed_work_sync(&write_work);
+  flush_workqueue(workqueue);
   destroy_workqueue(workqueue);
   pr_info("I'm out\n");
 }
