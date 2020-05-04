@@ -98,9 +98,22 @@ int async_rw(int fd, struct iovec *iov, int iovcnt, int offset)
 
 int main(int argc, const char *argv[]) {
   int iovcnt = 4;
-  char buffer[iovcnt][512];
+  int block_size = 512;
+  char *buffer[iovcnt];
+  void *cbuffer;
   struct iovec iov[iovcnt];
   int fd, i;
+
+  if (posix_memalign(&cbuffer, block_size, iovcnt * block_size) < 0) {
+    fprintf(stderr, "Unable to posix_memalign\n");
+    return -1;
+  }
+
+  memset(cbuffer, 1, iovcnt * block_size);
+  for (i = 0; i < iovcnt; i++) {
+    buffer[i] = cbuffer;
+    cbuffer += block_size;
+  }
 
   fd = open("/dev/rw_iter", O_RDWR);
   if (fd < 0) {
@@ -108,13 +121,11 @@ int main(int argc, const char *argv[]) {
     return -1;
   }
 
-  memset(buffer, 1, sizeof(buffer));
-
   for (i = 0; i < iovcnt; i++) {
     printf("buffer[%d] at %p\n", i, buffer[i]);
     sprintf(buffer[i], "Elias-%d\n", i);
     iov[i].iov_base = buffer[i];
-    iov[i].iov_len = sizeof(buffer[i]);
+    iov[i].iov_len = block_size;
   }
 
   if (argc == 2 && atoi(argv[1]))
